@@ -17,6 +17,22 @@ RELEASE_LIMIT = 10
 CACHE_FILE = "virt_news_cache.json"
 REQUEST_TIMEOUT = 15
 CACHE_TTL_DAYS = 7
+USER_AGENT = "virt-news-aggregator/1.0 (https://github.com/aginies/Virtu_news)"
+
+
+def _session():
+    """Return a requests.Session with a proper User-Agent and, if set,
+    a GitHub token for higher API rate limits (60 → 5000 req/h)."""
+    s = requests.Session()
+    s.headers["User-Agent"] = USER_AGENT
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        s.headers["Authorization"] = f"Bearer {token}"
+    return s
+
+
+# Module-level session reused across all fetchers
+_SESSION = _session()
 
 
 def load_cache(cache_file=CACHE_FILE, ttl_days=CACHE_TTL_DAYS):
@@ -122,7 +138,7 @@ def get_cc_in_text(text):
 
 def get_latest_qemu_versions(limit=RELEASE_LIMIT):
     try:
-        r = requests.get("https://wiki.qemu.org/ChangeLog/", timeout=REQUEST_TIMEOUT)
+        r = _SESSION.get("https://wiki.qemu.org/ChangeLog/", timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.content, "html.parser")
         links = soup.find_all("a", href=re.compile(r"^/ChangeLog/\d+\.\d+$"))
@@ -152,7 +168,7 @@ def get_qemu_news(cache_data=None, limit=RELEASE_LIMIT):
 
         url = f"https://wiki.qemu.org/ChangeLog/{version}"
         try:
-            r = requests.get(url, timeout=REQUEST_TIMEOUT)
+            r = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             soup = BeautifulSoup(r.content, "html.parser")
             news_items = []
@@ -241,7 +257,7 @@ def get_qemu_news(cache_data=None, limit=RELEASE_LIMIT):
 def get_libvirt_news(cache_data=None, limit=RELEASE_LIMIT):
     url = "https://libvirt.org/news.html"
     try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
+        r = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.content, "html.parser")
 
@@ -342,9 +358,10 @@ def get_libvirt_news(cache_data=None, limit=RELEASE_LIMIT):
 def get_github_news(
     repo_path, project_name, arch_dependent=False, cache_data=None, limit=RELEASE_LIMIT
 ):
-    url = f"https://api.github.com/repos/{repo_path}/releases"
+    per_page = min(limit, 100)  # GitHub API cap is 100 per page
+    url = f"https://api.github.com/repos/{repo_path}/releases?per_page={per_page}"
     try:
-        r = requests.get(url, timeout=REQUEST_TIMEOUT)
+        r = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         if not data or not isinstance(data, list):
@@ -380,7 +397,7 @@ def get_github_news(
                     f"{md_match.group(3)}/{md_match.group(4)}"
                 )
                 try:
-                    md_r = requests.get(raw_url, timeout=REQUEST_TIMEOUT)
+                    md_r = _SESSION.get(raw_url, timeout=REQUEST_TIMEOUT)
                     if md_r.status_code == 200:
                         body = md_r.text
                 except Exception:
@@ -437,7 +454,7 @@ def get_kernel_kvm_news(cache_data=None, limit=RELEASE_LIMIT):
     url_base = "https://kernelnewbies.org"
     try:
         # LinuxVersions has a clear list of version links
-        r = requests.get(f"{url_base}/LinuxVersions", timeout=REQUEST_TIMEOUT)
+        r = _SESSION.get(f"{url_base}/LinuxVersions", timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         soup = BeautifulSoup(r.content, "html.parser")
 
@@ -451,7 +468,7 @@ def get_kernel_kvm_news(cache_data=None, limit=RELEASE_LIMIT):
 
         # Also check LinuxChanges which often points to the absolute latest (even if not in LinuxVersions yet)
         try:
-            r_lc = requests.get(f"{url_base}/LinuxChanges", timeout=REQUEST_TIMEOUT)
+            r_lc = _SESSION.get(f"{url_base}/LinuxChanges", timeout=REQUEST_TIMEOUT)
             r_lc.raise_for_status()
             soup_lc = BeautifulSoup(r_lc.content, "html.parser")
             # Look for the main title or first H1/H2 link
@@ -487,7 +504,7 @@ def get_kernel_kvm_news(cache_data=None, limit=RELEASE_LIMIT):
 
             rel_url = f"{url_base}{path}"
             try:
-                r_rel = requests.get(rel_url, timeout=REQUEST_TIMEOUT)
+                r_rel = _SESSION.get(rel_url, timeout=REQUEST_TIMEOUT)
                 r_rel.raise_for_status()
                 soup_rel = BeautifulSoup(r_rel.content, "html.parser")
 
@@ -1238,14 +1255,15 @@ def main():
 
     # Filter project list if --projects was given
     if args.projects:
-        requested = {p.strip() for p in args.projects.split(",")}
-        available = {p["name"] for p in PROJECTS_CONFIG}
-        unknown = requested - available
+        requested = {p.strip().lower() for p in args.projects.split(",")}
+        name_map = {p["name"].lower(): p for p in PROJECTS_CONFIG}
+        unknown = requested - name_map.keys()
         if unknown:
             print(f"Unknown project(s): {', '.join(sorted(unknown))}")
             print(f"Available: {', '.join(p['name'] for p in PROJECTS_CONFIG)}")
             raise SystemExit(1)
-        selected = [p for p in PROJECTS_CONFIG if p["name"] in requested]
+        # Preserve configured order
+        selected = [name_map[r] for r in (p["name"].lower() for p in PROJECTS_CONFIG) if r in requested]
     else:
         selected = PROJECTS_CONFIG
 
