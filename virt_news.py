@@ -8,6 +8,8 @@ import markdown
 from datetime import datetime
 
 # Configuration
+RELEASE_LIMIT = 10
+
 ARCH_KEYWORDS = {
     'x86_64': ['x86', 'x86_64', 'amd64', 'intel'],
     'aarch64': ['arm', 'aarch64', 'arm64'],
@@ -33,7 +35,7 @@ def get_archs_in_text(text):
             found.append(arch)
     return found
 
-def get_latest_qemu_versions(limit=5):
+def get_latest_qemu_versions(limit=RELEASE_LIMIT):
     try:
         r = requests.get("https://wiki.qemu.org/ChangeLog/")
         soup = BeautifulSoup(r.content, 'html.parser')
@@ -54,7 +56,7 @@ def get_latest_qemu_versions(limit=5):
         return []
 
 def get_qemu_news():
-    versions = get_latest_qemu_versions(5)
+    versions = get_latest_qemu_versions(RELEASE_LIMIT)
     all_qemu_releases = []
     
     for version in versions:
@@ -88,7 +90,7 @@ def get_qemu_news():
         except Exception as e:
             print(f"Error fetching QEMU news for {version}: {e}")
             
-    return {"name": "QEMU", "releases": all_qemu_releases}
+    return {"name": "QEMU", "releases": all_qemu_releases, "arch_dependent": True}
 
 def get_libvirt_news():
     url = "https://libvirt.org/news.html"
@@ -99,7 +101,7 @@ def get_libvirt_news():
         all_libvirt_releases = []
         release_headers = [h1 for h1 in soup.find_all('h1') if '(' in h1.text and 'unreleased' not in h1.text.lower()]
         
-        for h1 in release_headers[:5]:
+        for h1 in release_headers[:RELEASE_LIMIT]:
             version_text = h1.text.strip().replace('¶', '').strip()
             # Try to find the section ID for anchoring
             section_id = ""
@@ -151,23 +153,25 @@ def get_libvirt_news():
                 "url": f"{url}{section_id}"
             })
             
-        return {"name": "Libvirt", "releases": all_libvirt_releases}
+        return {"name": "Libvirt", "releases": all_libvirt_releases, "arch_dependent": True}
     except Exception as e:
         print(f"Error fetching Libvirt news: {e}")
         return {"name": "Libvirt", "releases": []}
 
-def get_virt_manager_news():
-    url = "https://api.github.com/repos/virt-manager/virt-manager/releases"
+def get_github_news(repo_path, project_name, arch_dependent=False):
+    url = f"https://api.github.com/repos/{repo_path}/releases"
     try:
         r = requests.get(url)
         data = r.json()
-        if not data:
-            return {"name": "Virt-Manager", "releases": []}
+        if not data or not isinstance(data, list):
+            return {"name": project_name, "releases": [], "arch_dependent": arch_dependent}
         
-        all_virtman_releases = []
-        for release in data[:5]:
+        all_releases = []
+        for release in data[:RELEASE_LIMIT]:
             version = release['tag_name']
-            body = release['body']
+            body = release.get('body', '')
+            if not body: continue
+            
             html_body = markdown.markdown(body)
             soup = BeautifulSoup(html_body, 'html.parser')
             
@@ -177,27 +181,28 @@ def get_virt_manager_news():
                 if element.name in ['h1', 'h2', 'h3']:
                     current_cat = element.get_text()
                 elif element.name in ['ul', 'ol', 'p']:
-                    text = element.get_text()
-                    if 'bug' not in text.lower():
+                    text = element.get_text().strip()
+                    if text and 'bug' not in text.lower():
                         # Use first line as a title
                         title = text.split('\n')[0].strip()[:100]
                         if len(text.split('\n')[0].strip()) > 100: title += "..."
+                        
                         news_items.append({
                             "category": f"<b>{current_cat}</b>: {title}",
-                            "archs": [], # Not arch dependent for virt-manager
+                            "archs": get_archs_in_text(text) if arch_dependent else [],
                             "content": str(element)
                         })
             
-            all_virtman_releases.append({
+            all_releases.append({
                 "version": version, 
                 "news": news_items, 
-                "url": f"https://github.com/virt-manager/virt-manager/releases/tag/{version}"
+                "url": release.get('html_url', f"https://github.com/{repo_path}/releases/tag/{version}")
             })
             
-        return {"name": "Virt-Manager", "releases": all_virtman_releases}
+        return {"name": project_name, "releases": all_releases, "arch_dependent": arch_dependent}
     except Exception as e:
-        print(f"Error fetching Virt-Manager news: {e}")
-        return {"name": "Virt-Manager", "releases": []}
+        print(f"Error fetching {project_name} news: {e}")
+        return {"name": project_name, "releases": [], "arch_dependent": arch_dependent}
 
 def get_kernel_kvm_news():
     url_base = "https://kernelnewbies.org"
@@ -214,9 +219,17 @@ def get_kernel_kvm_news():
             if ver_text:
                 release_links.append((ver_text, a['href']))
         
-        # Take the most recent 5
+        # Deduplicate and sort by version
+        seen = set()
+        unique_links = []
+        for name, path in release_links:
+            if name not in seen:
+                unique_links.append((name, path))
+                seen.add(name)
+
+        # Take the most recent ones
         all_kernel_releases = []
-        for name, path in release_links[:5]:
+        for name, path in unique_links[:RELEASE_LIMIT]:
             version = f"Linux {name}" if "Linux" not in name else name
             rel_url = f"{url_base}{path}"
             try:
@@ -258,7 +271,7 @@ def get_kernel_kvm_news():
             except Exception as e:
                 print(f"Error fetching detail for {name}: {e}")
             
-        return {"name": "Kernel KVM", "releases": all_kernel_releases}
+        return {"name": "Kernel KVM", "releases": all_kernel_releases, "arch_dependent": True}
     except Exception as e:
         print(f"Error fetching Kernel KVM news: {e}")
         return {"name": "Kernel KVM", "releases": []}
@@ -336,10 +349,10 @@ def generate_html(all_news):
                  p_html += "<p>No major architectural features or deprecations found in this release.</p>"
             
             for item in release['news']:
-                if project['name'] == 'Virt-Manager':
-                    arch_tags = ""
-                else:
+                if project.get('arch_dependent'):
                     arch_tags = "".join([f'<span class="arch-tag arch-{arch}">{arch}</span>' for arch in item['archs']])
+                else:
+                    arch_tags = ""
                 
                 p_html += f"""
                 <details>
@@ -369,12 +382,18 @@ def main():
     libvirt = get_libvirt_news()
     
     print("Fetching news from Virt-Manager...")
-    virtman = get_virt_manager_news()
+    virtman = get_github_news("virt-manager/virt-manager", "Virt-Manager", False)
     
     print("Fetching news from Linux Kernel KVM...")
     kernel = get_kernel_kvm_news()
     
-    all_news = [qemu, libvirt, virtman, kernel]
+    print("Fetching news from EDK2 (Firmware)...")
+    edk2 = get_github_news("tianocore/edk2", "EDK2 / OVMF", False)
+    
+    print("Fetching news from Cockpit Machines...")
+    cockpit = get_github_news("cockpit-project/cockpit-machines", "Cockpit Machines", False)
+    
+    all_news = [qemu, libvirt, virtman, kernel, edk2, cockpit]
     
     html = generate_html(all_news)
     

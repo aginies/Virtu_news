@@ -8,6 +8,9 @@ A Python script that aggregates and organizes release news from QEMU, Libvirt, a
   - [QEMU ChangeLog](https://wiki.qemu.org/ChangeLog/)
   - [Libvirt News](https://libvirt.org/news.html)
   - [Virt-Manager Releases](https://github.com/virt-manager/virt-manager/releases)
+  - [Linux Kernel KVM](https://kernelnewbies.org/LinuxVersions)
+  - [EDK2 / OVMF](https://github.com/tianocore/edk2/releases)
+  - [Cockpit-machines](https://github.com/cockpit-project/cockpit-machines/releases)
 - **Smart Filtering:** Focuses on **New Features** and **Deprecations**.
 - **Architectural Focus:** Highlights news related to `x86_64`, `aarch64`, `ppc64`, and `s390x` (for QEMU and Libvirt).
 - **Interactive Report:** Generates a `virt_news_report.html` with:
