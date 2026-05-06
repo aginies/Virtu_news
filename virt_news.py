@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+import bleach
 import markdown
 import requests
 from bs4 import BeautifulSoup
@@ -56,7 +57,9 @@ def load_cache(cache_file=CACHE_FILE, ttl_days=CACHE_TTL_DAYS):
             if valid:
                 filtered[project] = valid
         if expired:
-            print(f"Cache: dropped {expired} expired entr{'y' if expired == 1 else 'ies'} (TTL={ttl_days}d)")
+            print(
+                f"Cache: dropped {expired} expired entr{'y' if expired == 1 else 'ies'} (TTL={ttl_days}d)"
+            )
         return filtered
     except Exception as e:
         print(f"Error loading cache: {e}")
@@ -65,8 +68,10 @@ def load_cache(cache_file=CACHE_FILE, ttl_days=CACHE_TTL_DAYS):
 
 def save_cache(cache, cache_file=CACHE_FILE):
     try:
-        with open(cache_file, "w") as f:
+        tmp = cache_file + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(cache, f, indent=4)
+        os.replace(tmp, cache_file)
     except Exception as e:
         print(f"Error saving cache: {e}")
 
@@ -75,7 +80,7 @@ ARCH_KEYWORDS = {
     "x86_64": ["x86", "x86_64", "amd64", "intel"],
     "aarch64": ["arm", "aarch64", "arm64"],
     "ppc64": ["powerpc", "ppc64", "ppc", "power"],
-    "s390x": ["s390x", "s390", "s290"],  # Including s290 as it was in original README
+    "s390x": ["s390x", "s390"],
 }
 
 CC_KEYWORDS = [
@@ -404,6 +409,30 @@ def get_github_news(
                     pass
 
             html_body = markdown.markdown(body)
+            html_body = bleach.clean(
+                html_body,
+                tags=[
+                    "p",
+                    "ul",
+                    "ol",
+                    "li",
+                    "h1",
+                    "h2",
+                    "h3",
+                    "h4",
+                    "h5",
+                    "h6",
+                    "strong",
+                    "em",
+                    "code",
+                    "del",
+                    "pre",
+                    "blockquote",
+                    "br",
+                ],
+                attributes={},
+                strip=True,
+            )
             soup = BeautifulSoup(html_body, "html.parser")
 
             news_items = []
@@ -416,7 +445,9 @@ def get_github_news(
                     if text and "bug" not in text.lower():
                         # Use first line as a title
                         first_line = text.split("\n")[0].strip()
-                        title = first_line[:100] + ("..." if len(first_line) > 100 else "")
+                        title = first_line[:100] + (
+                            "..." if len(first_line) > 100 else ""
+                        )
 
                         news_items.append(
                             {
@@ -615,7 +646,7 @@ def generate_html(all_news):
         f'#tab-{pid}:checked ~ .tabs-nav label[for="tab-{pid}"]' for pid in tab_ids
     )
     content_selectors = ",\n        ".join(
-        f'#tab-{pid}:checked ~ #content-{pid}' for pid in tab_ids
+        f"#tab-{pid}:checked ~ #content-{pid}" for pid in tab_ids
     )
 
     html_template = """\
@@ -976,7 +1007,7 @@ SCRIPTS_PLACEHOLDER
             content_html += f'<span class="release-title">{release["version"]}</span>'
             content_html += (
                 f'<a class="release-link" href="{release["url"]}" target="_blank">'
-                f'View Source</a>'
+                f"View Source</a>"
             )
             content_html += "</div>"
 
@@ -1002,14 +1033,14 @@ SCRIPTS_PLACEHOLDER
 
                 content_html += (
                     f'<details class="news-item" data-archs="{archs_attr}" data-cc="{cc_attr}">\n'
-                    f'                    <summary>\n'
+                    f"                    <summary>\n"
                     f'                        <span class="news-title">{item["category"]}</span>\n'
                     f'                        <div class="tags">{arch_tags}{cc_tags}</div>\n'
-                    f'                    </summary>\n'
+                    f"                    </summary>\n"
                     f'                    <div class="news-content">\n'
-                    f'                        {item["content"]}\n'
-                    f'                    </div>\n'
-                    f'                </details>\n'
+                    f"                        {item['content']}\n"
+                    f"                    </div>\n"
+                    f"                </details>\n"
                 )
 
             content_html += "</div>"  # .release
@@ -1153,9 +1184,9 @@ def generate_rss(all_news):
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = "Virt-News Aggregator"
     ET.SubElement(channel, "link").text = "https://github.com/"
-    ET.SubElement(channel, "description").text = (
-        "Virtualization technology news — QEMU, Libvirt, KVM, and more"
-    )
+    ET.SubElement(
+        channel, "description"
+    ).text = "Virtualization technology news — QEMU, Libvirt, KVM, and more"
     ET.SubElement(channel, "lastBuildDate").text = datetime.now().strftime(
         "%a, %d %b %Y %H:%M:%S +0000"
     )
@@ -1167,13 +1198,13 @@ def generate_rss(all_news):
             if not release.get("news"):
                 continue
             item = ET.SubElement(channel, "item")
-            ET.SubElement(item, "title").text = (
-                f"{project['name']} {release['version']}"
-            )
+            ET.SubElement(
+                item, "title"
+            ).text = f"{project['name']} {release['version']}"
             ET.SubElement(item, "link").text = release["url"]
-            ET.SubElement(item, "guid", isPermaLink="false").text = (
-                f"{release['url']}#{release['version']}"
-            )
+            ET.SubElement(
+                item, "guid", isPermaLink="false"
+            ).text = f"{release['url']}#{release['version']}"
             desc_lines = []
             for news in release["news"]:
                 cat = strip_tags.sub("", news.get("category", "")).strip()
@@ -1263,7 +1294,11 @@ def main():
             print(f"Available: {', '.join(p['name'] for p in PROJECTS_CONFIG)}")
             raise SystemExit(1)
         # Preserve configured order
-        selected = [name_map[r] for r in (p["name"].lower() for p in PROJECTS_CONFIG) if r in requested]
+        selected = [
+            name_map[r]
+            for r in (p["name"].lower() for p in PROJECTS_CONFIG)
+            if r in requested
+        ]
     else:
         selected = PROJECTS_CONFIG
 
@@ -1272,8 +1307,7 @@ def main():
     all_news_dict: dict = {}
     with ThreadPoolExecutor(max_workers=len(selected)) as executor:
         futures = {
-            executor.submit(p["fetch"], cache, args.limit): p["name"]
-            for p in selected
+            executor.submit(p["fetch"], cache, args.limit): p["name"] for p in selected
         }
         for future in as_completed(futures):
             name = futures[future]
@@ -1281,12 +1315,16 @@ def main():
                 result = future.result()
                 all_news_dict[name] = result
                 n = sum(len(r["news"]) for r in result["releases"])
-                print(f"  [done] {name} — {len(result['releases'])} release(s), {n} item(s)")
+                print(
+                    f"  [done] {name} — {len(result['releases'])} release(s), {n} item(s)"
+                )
             except Exception as e:
                 print(f"  [error] {name}: {e}")
 
     # Preserve configured order
-    all_news = [all_news_dict[p["name"]] for p in selected if p["name"] in all_news_dict]
+    all_news = [
+        all_news_dict[p["name"]] for p in selected if p["name"] in all_news_dict
+    ]
 
     # Update cache: merge new data into existing cache so a partial fetch failure
     # does not discard previously-cached entries for other projects.
