@@ -614,6 +614,117 @@ def get_kernel_kvm_news(cache_data=None, limit=RELEASE_LIMIT):
         return {"name": "Kernel KVM", "releases": []}
 
 
+def get_latest_libguestfs_versions(limit=RELEASE_LIMIT):
+    """Get the list of libguestfs release versions from the release-notes index."""
+    url = "https://libguestfs.org/guestfs-release-notes.1.html"
+    try:
+        r = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.content, "html.parser")
+        versions = []
+        # Each release is a link like guestfs-release-notes-1.58.1.html
+        for a in soup.find_all("a", href=re.compile(r"guestfs-release-notes-1\.(\d+)\.1\.html")):
+            href = a["href"]
+            m = re.search(r"guestfs-release-notes-1\.(\d+)\.1\.html", href)
+            if m:
+                versions.append(f"1.{m.group(1)}")
+        if not versions:
+            return []
+        # Sort by version descending, take top N
+        versions.sort(key=Version, reverse=True)
+        return versions[:limit]
+    except Exception as e:
+        print(f"Error finding libguestfs versions: {e}")
+        return []
+
+
+def get_libguestfs_news(cache_data=None, limit=RELEASE_LIMIT):
+    """Fetch libguestfs release notes from libguestfs.org."""
+    versions = get_latest_libguestfs_versions(limit)
+    all_releases = []
+
+    project_cache = cache_data.get("Libguestfs", {}) if cache_data else {}
+
+    for version in versions:
+        if version in project_cache:
+            all_releases.append(project_cache[version])
+            continue
+
+        # Build URL: guestfs-release-notes-1.58.1.html -> guestfs-release-notes-1.58.1.html
+        url = f"https://libguestfs.org/guestfs-release-notes-{version}.1.html"
+        try:
+            r = _SESSION.get(url, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.content, "html.parser")
+            news_items = []
+
+            # Find the release notes header (id is version-specific, e.g. "release-notes-for-libguestfs-1.58")
+            h1 = soup.find("h1", id=re.compile(r"release-notes-for-libguestfs-"))
+            if not h1:
+                continue
+
+            # Iterate over h2 sections (Inspection, API, Language bindings, etc.)
+            current = h1.find_next_sibling()
+            while current:
+                if current.name == "h2":
+                    section_name = current.get_text().strip()
+                    # Only collect relevant sections
+                    section_keywords = [
+                        "inspection",
+                        "api",
+                        "language bindings",
+                        "documentation",
+                        "build changes",
+                        "internals",
+                        "bugs fixed",
+                        "new features",
+                        "removed features",
+                        "deprecated",
+                        "improvements",
+                    ]
+                    if not any(kw in section_name.lower() for kw in section_keywords):
+                        current = current.find_next_sibling()
+                        continue
+
+                    # Collect content under this h2 until next h2
+                    content_blocks = []
+                    next_node = current.find_next_sibling()
+                    while next_node:
+                        if next_node.name == "h2":
+                            break
+                        if next_node.name in ["p", "ul", "ol"]:
+                            content_blocks.append(str(next_node))
+                        next_node = next_node.find_next_sibling()
+
+                    if content_blocks:
+                        combined = section_name + "".join(content_blocks)
+                        news_items.append(
+                            {
+                                "category": f"<b>{section_name}</b>",
+                                "archs": get_archs_in_text(combined),
+                                "cc_keywords": get_cc_in_text(combined),
+                                "content": "".join(content_blocks),
+                            }
+                        )
+                current = current.find_next_sibling()
+
+            all_releases.append(
+                {
+                    "version": version,
+                    "news": news_items,
+                    "url": url,
+                }
+            )
+        except Exception as e:
+            print(f"Error fetching libguestfs news for {version}: {e}")
+
+    return {
+        "name": "Libguestfs",
+        "releases": all_releases,
+        "arch_dependent": True,
+    }
+
+
 # Project registry — drives both parallel fetching and --projects filtering
 PROJECTS_CONFIG = [
     {
@@ -655,6 +766,10 @@ PROJECTS_CONFIG = [
             cache,
             lim,
         ),
+    },
+    {
+        "name": "Libguestfs",
+        "fetch": lambda cache, lim: get_libguestfs_news(cache, lim),
     },
 ]
 

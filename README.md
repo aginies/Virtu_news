@@ -12,11 +12,13 @@ A Python script that aggregates and organizes virtualization release news into a
   - [EDK2 / OVMF](https://github.com/tianocore/edk2/releases)
   - [Cockpit-machines](https://github.com/cockpit-project/cockpit-machines/releases)
   - [Confidential Containers](https://github.com/confidential-containers/confidential-containers/releases)
+  - [Libguestfs Release Notes](https://libguestfs.org/guestfs-release-notes.1.html)
 - **Smart Filtering:** Focuses on **New Features**, **Improvements**, and **Deprecations**.
 - **Architectural & Security Focus:**
   - Highlights news for `x86_64`, `aarch64`, `ppc64`, and `s390x`.
   - **Confidential Computing Tracking:** Automatically detects and badges news related to `TDX`, `SEV`, `SEV-SNP`, `SGX`, `TrustZone`, `CCA`, `Realm`, etc.
 - **Efficient Caching:** Uses a local `virt_news_cache.json` to store parsed news. Entries expire after 7 days by default so data stays fresh without unnecessary re-fetching.
+- **Diff Mode:** Compare releases between runs or specific versions. Shows ADDED, REMOVED, and CHANGED items with colorized terminal output, raw unified diffs, or styled HTML reports.
 - **Deep Content Parsing:** Automatically follows links to detailed Markdown release notes (e.g., for Confidential Containers) to extract full context.
 - **Multiple Output Formats:** HTML report, JSON, or RSS feed.
 - **Interactive Report:** Generates `virt_news_report.html` with:
@@ -65,6 +67,8 @@ xdg-open virt_news_report.html
 --cache-file PATH     custom cache file location (default: virt_news_cache.json)
 --cache-ttl DAYS      cache TTL in days; 0 = never expire (default: 7)
 --format FORMAT       output format: html, json, or rss (default: html)
+--diff [PROJECT A B]  diff mode: compare current vs last run, or two specific versions
+                      (default format: text; use --format html or diff for file/raw output)
 ```
 
 ### Examples
@@ -86,8 +90,29 @@ python3 virt_news.py --format rss --output virt_news.rss
 python3 virt_news.py --cache-ttl 30 --cache-file ~/.cache/virt_news.json
 ```
 
+### Diff Mode
+
+Compare releases between runs or specific versions:
+
+```bash
+# Compare current run vs last cached run (terminal summary)
+python3 virt_news.py --diff
+
+# Write an HTML diff report
+python3 virt_news.py --diff --format html
+
+# Raw unified diff output
+python3 virt_news.py --diff --format diff
+
+# Compare two specific versions of a project
+python3 virt_news.py --diff libvirt v12.3.0 v12.2.0
+
+# HTML output for specific version comparison
+python3 virt_news.py --diff qemu 10.2 10.1 --format html
+```
+
 Available project names for `--projects`:
-`QEMU`, `Libvirt`, `Virt-Manager`, `Kernel KVM`, `EDK2 / OVMF`, `Cockpit Machines`, `Confidential Containers`
+`QEMU`, `Libvirt`, `Virt-Manager`, `Kernel KVM`, `EDK2 / OVMF`, `Cockpit Machines`, `Confidential Containers`, `Libguestfs`
 
 ## Files
 
@@ -95,6 +120,7 @@ Available project names for `--projects`:
 - `requirements.txt`: Python dependencies.
 - `virt_news_cache.json`: Local cache of parsed news (generated after first run).
 - `virt_news_report.html`: The generated interactive HTML report.
+- `virt_news_diff.html`: The generated HTML diff report (created by `--diff --format html`).
 
 ## Configuration
 
