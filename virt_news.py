@@ -20,6 +20,23 @@ REQUEST_TIMEOUT = 15
 CACHE_TTL_DAYS = 7
 USER_AGENT = "virt-news-aggregator/1.0 (https://github.com/aginies/Virtu_news)"
 
+# ANSI color codes
+_CSI = "\033["
+COLORS = {
+    "cyan":    f"{_CSI}36m",
+    "green":   f"{_CSI}32m",
+    "yellow":  f"{_CSI}33m",
+    "red":     f"{_CSI}31m",
+    "bold":    f"{_CSI}1m",
+    "underline": f"{_CSI}4m",
+    "reset":   f"{_CSI}0m",
+    "dim":     f"{_CSI}2m",
+}
+
+def _c(color, text):
+    """Wrap text in ANSI color."""
+    return COLORS[color] + str(text) + COLORS["reset"]
+
 
 def _session():
     """Return a requests.Session with a proper User-Agent and, if set,
@@ -47,15 +64,20 @@ def load_cache(cache_file=CACHE_FILE, ttl_days=CACHE_TTL_DAYS):
         cutoff = datetime.now().timestamp() - ttl_days * 86400
         filtered = {}
         expired = 0
-        for project, releases in raw.items():
+        for key, value in raw.items():
+            if key == "_meta":
+                filtered["_meta"] = value
+                continue
+            if not isinstance(value, dict):
+                continue
             valid = {}
-            for version, entry in releases.items():
+            for version, entry in value.items():
                 if entry.get("cached_at", 0) >= cutoff:
                     valid[version] = entry
                 else:
                     expired += 1
             if valid:
-                filtered[project] = valid
+                filtered[key] = valid
         if expired:
             print(
                 f"Cache: dropped {expired} expired entr{'y' if expired == 1 else 'ies'} (TTL={ttl_days}d)"
@@ -1158,6 +1180,344 @@ SCRIPTS_PLACEHOLDER
     return html
 
 
+# ── Diff mode ──────────────────────────────────────────────────────────────
+
+def _version_key(v):
+    """Sort key for version strings; falls back to string comparison."""
+    try:
+        return Version(v)
+    except Exception:
+        return Version("0.0.0")
+
+
+def compute_diff(all_news, last_news):
+    """Compare current report with previous report.
+
+    Returns a dict:
+        {
+            "projects": [
+                {
+                    "name": ...,
+                    "added": [{"version": ..., "news": ..., "url": ...}],
+                    "removed": [{"version": ..., "news": ..., "url": ...}],
+                    "changed": [{"version": ..., "old": ..., "new": ...}],
+                }
+            ]
+        }
+    """
+    current_map = {}
+    for proj in all_news:
+        current_map[proj["name"]] = {r["version"]: r for r in proj["releases"]}
+
+    last_map = {}
+    for proj in last_news:
+        last_map[proj["name"]] = {r["version"]: r for r in proj["releases"]}
+
+    all_names = sorted(set(list(current_map.keys()) + list(last_map.keys())))
+
+    projects = []
+    for name in all_names:
+        cur = current_map.get(name, {})
+        lst = last_map.get(name, {})
+        cur_vers = set(cur)
+        lst_vers = set(lst)
+
+        added = [cur[v] for v in sorted(cur_vers - lst_vers, key=_version_key)]
+        removed = [lst[v] for v in sorted(lst_vers - cur_vers, key=_version_key)]
+        changed = []
+        for v in sorted(cur_vers & lst_vers, key=_version_key):
+            old = lst[v]
+            new = cur[v]
+            # Compare news items
+            old_news = set(n["category"] for n in old.get("news", []))
+            new_news = set(n["category"] for n in new.get("news", []))
+            if old_news != new_news or old.get("url") != new.get("url"):
+                changed.append({"version": v, "old": old, "new": new})
+
+        if added or removed or changed:
+            projects.append({
+                "name": name,
+                "added": added,
+                "removed": removed,
+                "changed": changed,
+            })
+
+    return {"projects": projects}
+
+
+def _count_news(items):
+    """Count total news items in a release."""
+    return sum(len(r.get("news", [])) for r in items)
+
+
+def _plain_text(html_str):
+    """Strip HTML tags and get plain text from a news item's content."""
+    if not html_str:
+        return ""
+    try:
+        soup = BeautifulSoup(html_str, "html.parser")
+        return soup.get_text(separator=" ", strip=True)
+    except Exception:
+        return html_str
+
+
+def _short_text(html_str, max_len=120):
+    """Get a short plain-text preview of a news item."""
+    text = _plain_text(html_str)
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+
+def _status_text(status):
+    return {
+        "added": _c("green", "ADDED"),
+        "removed": _c("red", "REMOVED"),
+        "changed": _c("yellow", "CHANGED"),
+    }[status]
+
+
+def generate_diff_summary(diff_result, now, last_run):
+    """Generate a colorized, human-readable diff summary."""
+    lines = []
+
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    last_str = last_run.strftime("%Y-%m-%d %H:%M") if last_run else "N/A"
+
+    lines.append(_c("bold", f"  virt-news diff — {now_str} (last: {last_str})"))
+    lines.append(_c("dim", "  " + "=" * 68))
+    lines.append("")
+
+    total_added = 0
+    total_removed = 0
+    total_changed = 0
+
+    for proj in diff_result["projects"]:
+        if not proj["added"] and not proj["removed"] and not proj["changed"]:
+            continue
+
+        for entry in proj["added"]:
+            total_added += 1
+            lines.append(
+                f"  {_c('bold', proj['name'])} {_c('bold', entry['version'])}  {_status_text('added')}"
+            )
+            for item in entry.get("news", []):
+                cat = item.get("category", "")
+                text = _short_text(item.get("content", ""))
+                if cat:
+                    lines.append(f"    {_c('dim', f'• {cat}: {text}')}")
+                else:
+                    lines.append(f"    {_c('dim', f'• {text}')}")
+
+        for entry in proj["removed"]:
+            total_removed += 1
+            lines.append(
+                f"  {_c('bold', proj['name'])} {_c('bold', entry['version'])}  {_status_text('removed')}"
+            )
+            for item in entry.get("news", []):
+                cat = item.get("category", "")
+                text = _short_text(item.get("content", ""))
+                if cat:
+                    lines.append(f"    {_c('dim', f'• {cat}: {text}')}")
+                else:
+                    lines.append(f"    {_c('dim', f'• {text}')}")
+
+        for entry in proj["changed"]:
+            total_changed += 1
+            old_count = len(entry["old"].get("news", []))
+            new_count = len(entry["new"].get("news", []))
+            if new_count != old_count:
+                detail = f"{old_count} → {new_count} item(s)"
+            else:
+                detail = f"{new_count} item(s)"
+            lines.append(
+                f"  {_c('bold', proj['name'])} {_c('bold', entry['version'])}  {_status_text('changed')}  {detail}"
+            )
+            # Show only the items that differ
+            old_news = {n["category"]: n for n in entry["old"].get("news", [])}
+            new_news = {n["category"]: n for n in entry["new"].get("news", [])}
+            old_cats = set(old_news)
+            new_cats = set(new_news)
+            for cat in sorted(old_cats & new_cats):
+                old_text = _short_text(old_news[cat].get("content", ""))
+                new_text = _short_text(new_news[cat].get("content", ""))
+                if old_text != new_text:
+                    lines.append(f"    {_c('yellow', f'• {cat}:')}")
+                    lines.append(f"      {_c('red', f'- {old_text}')}")
+                    lines.append(f"      {_c('green', f'+ {new_text}')}")
+            for cat in sorted(old_cats - new_cats):
+                old_text = _short_text(old_news[cat].get("content", ""))
+                lines.append(f"    {_c('red', f'• - {cat}: {old_text}')}")
+            for cat in sorted(new_cats - old_cats):
+                new_text = _short_text(new_news[cat].get("content", ""))
+                lines.append(f"    {_c('green', f'• + {cat}: {new_text}')}")
+
+    lines.append("")
+    lines.append(_c("dim", "  " + "-" * 68))
+    parts = []
+    if total_added:
+        parts.append(_c("green", f"+{total_added} new"))
+    if total_removed:
+        parts.append(_c("red", f"-{total_removed} removed"))
+    if total_changed:
+        parts.append(_c("yellow", f"~{total_changed} changed"))
+    if not parts:
+        parts.append(_c("dim", "No changes detected"))
+    lines.append("  " + "  ".join(parts))
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_diff_html(diff_result, now, last_run):
+    """Generate an HTML report showing the diff summary."""
+    now_str = now.strftime("%Y-%m-%d %H:%M")
+    last_str = last_run.strftime("%Y-%m-%d %H:%M") if last_run else "N/A"
+
+    status_class = {"added": "added", "removed": "removed", "changed": "changed"}
+    status_label = {"added": "ADDED", "removed": "REMOVED", "changed": "CHANGED"}
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>virt-news diff</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #1e293b; margin: 0; padding: 20px; }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        h1 {{ color: #2563eb; margin-bottom: 4px; }}
+        .meta {{ color: #64748b; font-size: 0.9rem; margin-bottom: 24px; }}
+        .status {{ display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }}
+        .status.added {{ background: #dcfce7; color: #166534; }}
+        .status.removed {{ background: #fee2e2; color: #991b1b; }}
+        .status.changed {{ background: #fef9c3; color: #854d0e; }}
+        h2 {{ font-size: 1.1rem; margin: 20px 0 8px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+        th, td {{ text-align: left; padding: 6px 12px; border: 1px solid #e2e8f0; }}
+        th {{ background: #f1f5f9; font-weight: 600; }}
+        tr:nth-child(even) {{ background: #fafafa; }}
+        .count {{ color: #64748b; font-size: 0.85rem; }}
+        details {{ margin: 8px 0; border: 1px solid #e2e8f0; border-radius: 6px; }}
+        summary {{ padding: 8px 12px; cursor: pointer; font-weight: 600; list-style: none; }}
+        summary::-webkit-details-marker {{ display: none; }}
+        h3 {{ font-size: 1rem; margin: 12px 0 4px; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>virt-news diff</h1>
+    <div class="meta">Generated: {now_str} | Last run: {last_str}</div>
+"""
+
+    total_added = 0
+    total_removed = 0
+    total_changed = 0
+
+    for proj in diff_result["projects"]:
+        if not proj["added"] and not proj["removed"] and not proj["changed"]:
+            continue
+
+        html += f'<h2>{proj["name"]}</h2>\n'
+
+        for entry in proj["added"]:
+            total_added += 1
+            html += f'<details><summary><b>{entry["version"]}</b> <span class="status added">ADDED</span></summary>\n'
+            for item in entry.get("news", []):
+                cat = item.get("category", "")
+                text = _plain_text(item.get("content", ""))
+                html += f'<div style="padding:4px 0;">{cat}: {text}</div>\n'
+            html += '</details>\n'
+
+        for entry in proj["removed"]:
+            total_removed += 1
+            html += f'<details><summary><b>{entry["version"]}</b> <span class="status removed">REMOVED</span></summary>\n'
+            for item in entry.get("news", []):
+                cat = item.get("category", "")
+                text = _plain_text(item.get("content", ""))
+                html += f'<div style="padding:4px 0;">{cat}: {text}</div>\n'
+            html += '</details>\n'
+
+        for entry in proj["changed"]:
+            total_changed += 1
+            old_count = len(entry["old"].get("news", []))
+            new_count = len(entry["new"].get("news", []))
+            if new_count != old_count:
+                detail = f"{old_count} &rarr; {new_count}"
+            else:
+                detail = f"{new_count}"
+            html += f'<h3>{entry["version"]} <span class="status changed">CHANGED</span> ({detail} items)</h3>\n'
+
+            old_news = {n["category"]: n for n in entry["old"].get("news", [])}
+            new_news = {n["category"]: n for n in entry["new"].get("news", [])}
+            old_cats = set(old_news)
+            new_cats = set(new_news)
+
+            # Show only items that differ
+            for cat in sorted(old_cats & new_cats):
+                old_text = _plain_text(old_news[cat].get("content", ""))
+                new_text = _plain_text(new_news[cat].get("content", ""))
+                if old_text != new_text:
+                    html += f'<details><summary>{cat}</summary>\n'
+                    html += f'<div style="margin:4px 0;"><span style="color:#991b1b;">- {old_text}</span></div>\n'
+                    html += f'<div style="margin:4px 0;"><span style="color:#166534;">+ {new_text}</span></div>\n'
+                    html += '</details>\n'
+
+            for cat in sorted(old_cats - new_cats):
+                old_text = _plain_text(old_news[cat].get("content", ""))
+                html += f'<div style="margin:4px 0;color:#991b1b;">{cat}: {old_text}</div>\n'
+            for cat in sorted(new_cats - old_cats):
+                new_text = _plain_text(new_news[cat].get("content", ""))
+                html += f'<div style="margin:4px 0;color:#166534;">{cat}: {new_text}</div>\n'
+
+    html += f"""\
+    <hr style="margin: 24px 0; border: none; border-top: 1px solid #e2e8f0;">
+    <div style="font-size: 0.9rem;">
+"""
+    parts = []
+    if total_added:
+        parts.append(f'<span style="color: #166534;">+{total_added} new</span>')
+    if total_removed:
+        parts.append(f'<span style="color: #991b1b;">-{total_removed} removed</span>')
+    if total_changed:
+        parts.append(f'<span style="color: #854d0e;">~{total_changed} changed</span>')
+    if not parts:
+        parts.append("No changes detected")
+    html += " | ".join(parts)
+    html += "</div>\n</div>\n</body>\n</html>"
+
+    return html
+
+
+def _strip_cache_meta(report):
+    """Remove internal cache metadata for clean diff output."""
+    stripped = []
+    for proj in report:
+        proj_out = dict(proj)
+        proj_out["releases"] = [
+            {k: v for k, v in r.items() if k != "cached_at"}
+            for r in proj_out["releases"]
+        ]
+        stripped.append(proj_out)
+    return stripped
+
+
+def generate_unified_diff(report_a, report_b):
+    """Generate a raw unified diff between two report dicts."""
+    import difflib
+    a_str = json.dumps(_strip_cache_meta(report_a), indent=2, ensure_ascii=False)
+    b_str = json.dumps(_strip_cache_meta(report_b), indent=2, ensure_ascii=False)
+    return "\n".join(
+        difflib.unified_diff(
+            a_str.splitlines(keepends=True),
+            b_str.splitlines(keepends=True),
+            fromfile="previous",
+            tofile="current",
+        )
+    )
+
+
 def generate_json(all_news):
     """Serialize all_news to JSON, stripping internal cache metadata."""
     output = []
@@ -1264,17 +1624,157 @@ def parse_args():
     )
     parser.add_argument(
         "--format",
-        choices=["html", "json", "rss"],
-        default="html",
-        help="output format (default: html)",
+        choices=["html", "json", "rss", "diff"],
+        default=None,
+        help="output format (default: html for normal mode, text for --diff mode)",
+    )
+    parser.add_argument(
+        "--diff",
+        nargs="*",
+        metavar="PROJECT VERSION_A VERSION_B",
+        help="show diff between current run and last cached run "
+             "(no args) or between two specific versions "
+             "(PROJECT VERSION_A VERSION_B)",
     )
     return parser.parse_args()
+
+
+def _fetch_projects(selected, cache, limit):
+    """Fetch all selected projects in parallel. Returns (all_news, all_news_dict)."""
+    print(f"Fetching {len(selected)} project(s) in parallel (limit={limit})...")
+    all_news_dict: dict = {}
+    with ThreadPoolExecutor(max_workers=len(selected)) as executor:
+        futures = {
+            executor.submit(p["fetch"], cache, limit): p["name"] for p in selected
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result = future.result()
+                all_news_dict[name] = result
+                n = sum(len(r["news"]) for r in result["releases"])
+                print(
+                    f"  [done] {name} — {len(result['releases'])} release(s), {n} item(s)"
+                )
+            except Exception as e:
+                print(f"  [error] {name}: {e}")
+    all_news = [
+        all_news_dict[p["name"]] for p in selected if p["name"] in all_news_dict
+    ]
+    return all_news, all_news_dict
 
 
 def main():
     args = parse_args()
 
-    # Resolve output filename
+    # ── Diff mode ─────────────────────────────────────────────────────────
+    if args.diff is not None:
+        # Default format for diff mode is text (terminal summary)
+        if args.format is None:
+            args.format = "text"
+        # Load previous cache
+        prev_cache = {} if args.no_cache else load_cache(args.cache_file, args.cache_ttl)
+        prev_meta = prev_cache.get("_meta", {})
+        prev_report = prev_meta.get("last_report", "")
+        prev_run = datetime.fromisoformat(prev_meta.get("last_run", "")) if prev_meta.get("last_run") else None
+        prev_news = prev_meta.get("last_news", [])
+
+        if len(args.diff) == 0:
+            # --diff without args: compare current vs last
+            if not prev_report:
+                print(_c("yellow", "No previous report found in cache. Run without --diff first."))
+                raise SystemExit(0)
+            print(f"Comparing current run vs last cached run ({prev_run.strftime('%Y-%m-%d %H:%M') if prev_run else 'N/A'})")
+            print()
+
+            cache = {} if args.no_cache else load_cache(args.cache_file, args.cache_ttl)
+            all_news, _ = _fetch_projects(PROJECTS_CONFIG, cache, args.limit)
+            diff_result = compute_diff(all_news, prev_news)
+            now = datetime.now()
+
+            if args.format == "diff":
+                print(generate_unified_diff(prev_news, all_news))
+            elif args.format == "html":
+                output = generate_diff_html(diff_result, now, prev_run)
+                out_file = args.output or "virt_news_diff.html"
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(output)
+                print(f"Report written: {out_file}")
+            else:
+                print(generate_diff_summary(diff_result, now, prev_run))
+            return
+
+        elif len(args.diff) == 3:
+            # --diff PROJECT VERSION_A VERSION_B
+            project_name, version_a, version_b = args.diff
+            project_name = project_name.strip()
+            version_a = version_a.strip()
+            version_b = version_b.strip()
+
+            # Find matching project in config
+            proj_config = None
+            for pc in PROJECTS_CONFIG:
+                if pc["name"].lower() == project_name.lower():
+                    proj_config = pc
+                    break
+            if not proj_config:
+                print(f"Unknown project: {project_name}")
+                print(f"Available: {', '.join(p['name'] for p in PROJECTS_CONFIG)}")
+                raise SystemExit(1)
+
+            print(f"Comparing {project_name} {version_a} vs {version_b}")
+            print()
+
+            # Fetch or use cache
+            cache = {} if args.no_cache else load_cache(args.cache_file, args.cache_ttl)
+            result = proj_config["fetch"](cache, 100)
+            releases = result["releases"]
+
+            a_entry = None
+            b_entry = None
+            for r in releases:
+                if r["version"].startswith(version_a):
+                    a_entry = r
+                if r["version"].startswith(version_b):
+                    b_entry = r
+
+            if a_entry is None or b_entry is None:
+                available = [r["version"] for r in releases]
+                print(f"Could not find requested version(s). Available: {', '.join(available[:10])}")
+                raise SystemExit(1)
+
+            diff_result = {"projects": [{
+                "name": proj_config["name"],
+                "added": [b_entry] if a_entry is None else [],
+                "removed": [a_entry] if b_entry is None else [],
+                "changed": [{"version": version_a, "old": a_entry, "new": b_entry}] if a_entry and b_entry else [],
+            }]}
+            now = datetime.now()
+
+            if args.format == "diff":
+                # Wrap single releases as a single-project report for clean diff
+                report_a = [{"name": proj_config["name"], "releases": [a_entry]}]
+                report_b = [{"name": proj_config["name"], "releases": [b_entry]}]
+                print(generate_unified_diff(report_a, report_b))
+            elif args.format == "html":
+                output = generate_diff_html(diff_result, now, None)
+                out_file = args.output or "virt_news_diff.html"
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write(output)
+                print(f"Report written: {out_file}")
+            else:
+                print(generate_diff_summary(diff_result, now, None))
+            return
+
+        else:
+            print("Usage: virt_news.py --diff [PROJECT VERSION_A VERSION_B]")
+            raise SystemExit(1)
+
+    # ── Normal mode ───────────────────────────────────────────────────────
+    # Apply defaults based on mode
+    if args.format is None:
+        args.format = "html"  # normal mode default
+
     if args.output is not None:
         output_file = args.output
     else:
@@ -1302,29 +1802,7 @@ def main():
     else:
         selected = PROJECTS_CONFIG
 
-    # Parallel fetch
-    print(f"Fetching {len(selected)} project(s) in parallel (limit={args.limit})...")
-    all_news_dict: dict = {}
-    with ThreadPoolExecutor(max_workers=len(selected)) as executor:
-        futures = {
-            executor.submit(p["fetch"], cache, args.limit): p["name"] for p in selected
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                result = future.result()
-                all_news_dict[name] = result
-                n = sum(len(r["news"]) for r in result["releases"])
-                print(
-                    f"  [done] {name} — {len(result['releases'])} release(s), {n} item(s)"
-                )
-            except Exception as e:
-                print(f"  [error] {name}: {e}")
-
-    # Preserve configured order
-    all_news = [
-        all_news_dict[p["name"]] for p in selected if p["name"] in all_news_dict
-    ]
+    all_news, _ = _fetch_projects(selected, cache, args.limit)
 
     # Update cache: merge new data into existing cache so a partial fetch failure
     # does not discard previously-cached entries for other projects.
@@ -1338,6 +1816,19 @@ def main():
             entry = dict(release)
             entry["cached_at"] = now_ts
             new_cache[name][release["version"]] = entry
+
+    # Store last report for diff mode
+    if args.format == "html":
+        last_report = generate_html(all_news)
+    elif args.format == "json":
+        last_report = generate_json(all_news)
+    else:
+        last_report = generate_rss(all_news)
+    new_cache["_meta"] = {
+        "last_report": last_report,
+        "last_run": datetime.now().isoformat(),
+        "last_news": all_news,
+    }
     save_cache(new_cache, args.cache_file)
 
     # Generate and write output
